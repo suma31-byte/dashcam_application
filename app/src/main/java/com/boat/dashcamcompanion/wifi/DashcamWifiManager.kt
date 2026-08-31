@@ -76,8 +76,7 @@ class DashcamWifiManager(private val context: Context) {
                     @Suppress("DEPRECATION")
                     val resultSsid = result.SSID
                     if (resultSsid.isNullOrBlank()) return@mapNotNull null
-                    val looksLikeCamera = listOf("hive", "dashcam", "boat").any { resultSsid.contains(it, ignoreCase = true) }
-                    if (!looksLikeCamera) return@mapNotNull null
+                    if (!WifiUtils.looksLikeCameraSsid(resultSsid)) return@mapNotNull null
                     NearbyNetwork(resultSsid, result.level)
                 }
                 .distinctBy { it.ssid }
@@ -140,7 +139,5 @@ class DashcamWifiManager(private val context: Context) {
         _linkInfo.value = _linkInfo.value.copy(network = null, boundToCamera = false)
     }
 
-    private fun intToIp(addr: Int): String {
-        return "${addr and 0xFF}.${addr shr 8 and 0xFF}.${addr shr 16 and 0xFF}.${addr shr 24 and 0xFF}"
-    }
+    private fun intToIp(addr: Int): String = WifiUtils.intToIp(addr)
 }

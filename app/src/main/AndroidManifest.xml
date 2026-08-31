@@ -7,8 +7,11 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
-    <!-- Needed pre-Android 13 to read/scan the connected Wi-Fi SSID -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Needed pre-Android 13 to read/scan the connected Wi-Fi SSID.
+         Coarse is sufficient: we only ever read SSID/scan results, not
+         precise device location, so ACCESS_FINE_LOCATION isn't required
+         (and would trigger CoarseFineLocation lint since only one is declared). -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <!-- Android 13+ replacement for Wi-Fi related location permission -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
         tools:targetApi="33" />

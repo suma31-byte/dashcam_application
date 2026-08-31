@@ -108,15 +108,15 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
             return
         }
         val contentBase = describeResp.headers["content-base"]?.trim()?.trimEnd() ?: urlString
-        val sdp = parseSdp(describeResp.body)
+        val sdp = SdpParser.parseSdp(describeResp.body)
         val sprop = sdp.spropParameterSets
         if (sprop == null) {
             postStatus("No H264 video track in SDP")
             return
         }
 
-        val aggregateUrl = resolveControlUrl(contentBase, sdp.aggregateControl)
-        val trackUrl = resolveControlUrl(aggregateUrl, sdp.trackControl)
+        val aggregateUrl = SdpParser.resolveControlUrl(contentBase, sdp.aggregateControl)
+        val trackUrl = SdpParser.resolveControlUrl(aggregateUrl, sdp.trackControl)
 
         sendRequest(
             output, "SETUP", trackUrl, ++cseq,
@@ -213,49 +213,8 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
         // Maps the camera's own RTP capture clock onto our local playback clock, so
         // frames get displayed at the same relative spacing they were captured with —
         // instead of whatever spacing the network happened to deliver them in.
-        var prevRawTimestamp: Long? = null
-        var wrapOffset = 0L
-        var rtpAnchorTicks: Long? = null
-        var localAnchorNs = 0L
-
-        fun unwrapTimestamp(raw: Long): Long {
-            val prev = prevRawTimestamp
-            if (prev != null) {
-                val diff = raw - prev
-                if (diff < -(1L shl 31)) wrapOffset += (1L shl 32)
-                else if (diff > (1L shl 31)) wrapOffset -= (1L shl 32)
-            }
-            prevRawTimestamp = raw
-            return raw + wrapOffset
-        }
-
-        fun scheduledPtsUs(rawTimestamp: Long): Long {
-            val ticks = unwrapTimestamp(rawTimestamp)
-            val nowNs = System.nanoTime()
-            val anchorTicks = rtpAnchorTicks
-            if (anchorTicks == null) {
-                rtpAnchorTicks = ticks
-                localAnchorNs = nowNs + SMOOTHING_BUFFER_NS
-                return localAnchorNs / 1000
-            }
-            val ptsNs = localAnchorNs + (ticks - anchorTicks) * 1_000_000_000L / RTP_CLOCK_HZ
-            // The RTP anchor above assumes the camera's capture clock and this phone's
-            // clock tick at exactly the same rate forever. They don't — real clocks
-            // drift, and cheap camera encoders occasionally skip/duplicate timestamps
-            // outright. Left uncorrected, that drift accumulates over a session into
-            // a growing gap between what the camera is pointed at right now and what's
-            // on screen — which is exactly the "follows a few seconds behind, then
-            // catches up" symptom. So: if the schedule has drifted more than
-            // MAX_DRIFT_NS from where it should be relative to actual now, snap back
-            // to a fresh small buffer instead of letting the gap keep widening.
-            val drift = ptsNs - (nowNs + SMOOTHING_BUFFER_NS)
-            if (drift > MAX_DRIFT_NS || drift < -MAX_DRIFT_NS) {
-                rtpAnchorTicks = ticks
-                localAnchorNs = nowNs + SMOOTHING_BUFFER_NS
-                return localAnchorNs / 1000
-            }
-            return ptsNs / 1000
-        }
+        val timestampScheduler = RtpTimestampScheduler()
+        fun scheduledPtsUs(rawTimestamp: Long): Long = timestampScheduler.scheduledPtsUs(rawTimestamp)
 
         while (running) {
             val marker = input.read()
@@ -384,46 +343,6 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
         }
     }
 
-    private fun resolveControlUrl(base: String, control: String?): String {
-        if (control.isNullOrEmpty() || control == "*") return base
-        if (control.startsWith("rtsp://")) return control
-        return if (base.endsWith("/")) base + control else "$base/$control"
-    }
-
-    private data class SdpInfo(
-        val aggregateControl: String?,
-        val trackControl: String?,
-        val spropParameterSets: String?
-    )
-
-    private fun parseSdp(body: String): SdpInfo {
-        var aggregateControl: String? = null
-        var trackControl: String? = null
-        var sprop: String? = null
-        var inVideoBlock = false
-        for (rawLine in body.lines()) {
-            val line = rawLine.trim()
-            when {
-                line.startsWith("m=video") -> inVideoBlock = true
-                line.startsWith("m=") -> inVideoBlock = false
-                line.startsWith("a=control:") -> {
-                    val value = line.substringAfter("a=control:")
-                    if (inVideoBlock) trackControl = value else aggregateControl = value
-                }
-                inVideoBlock && line.startsWith("a=fmtp:") -> {
-                    val params = line.substringAfter(' ')
-                    params.split(";").forEach { p ->
-                        val kv = p.trim().split("=", limit = 2)
-                        if (kv.size == 2 && kv[0].equals("sprop-parameter-sets", ignoreCase = true)) {
-                            sprop = kv[1]
-                        }
-                    }
-                }
-            }
-        }
-        return SdpInfo(aggregateControl, trackControl, sprop)
-    }
-
     private fun sendRequest(
         output: OutputStream,
         method: String,
@@ -478,8 +397,5 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
 
     companion object {
         private const val TAG = "RtspH264Client"
-        private const val RTP_CLOCK_HZ = 90000L // standard RTP clock rate for H264 payloads (RFC 6184)
-        private const val SMOOTHING_BUFFER_NS = 150_000_000L // 150ms jitter buffer, see scheduledPtsUs()
-        private const val MAX_DRIFT_NS = 400_000_000L // resync threshold, see scheduledPtsUs()
     }
 }
