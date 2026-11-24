@@ -63,10 +63,13 @@ fun ConnectScreen(
         wifiManager.pollCurrentWifi()
     }
 
+    // The Wi-Fi name is hidden by Android until Location is granted, but the gateway address
+    // is not, so a link with a gateway still counts as connected.
+    val wifiLinked = linkInfo.ssid != null || linkInfo.gatewayIp != null
     val looksLikeCamera = linkInfo.ssid?.let { ssid ->
         val lower = ssid.lowercase()
         lower.contains("dashcam") || lower.contains("hive") || lower.contains("boat") || lower.contains("cam")
-    } ?: false
+    } ?: (linkInfo.gatewayIp != null)
 
     Column(
         modifier = Modifier
@@ -155,7 +158,7 @@ fun ConnectScreen(
                     }
                 }
             },
-            enabled = linkInfo.ssid != null && !binding,
+            enabled = wifiLinked && !binding,
             shape = RoundedCornerShape(50),
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
             modifier = Modifier.fillMaxWidth().height(52.dp).padding(bottom = 24.dp)
@@ -195,7 +198,7 @@ private fun WlanCard(
         ) {
             Text("WLAN", style = MaterialTheme.typography.titleSmall)
             Switch(
-                checked = linkInfo.ssid != null,
+                checked = linkInfo.ssid != null || linkInfo.gatewayIp != null,
                 onCheckedChange = null,
                 enabled = false,
                 colors = SwitchDefaults.colors(
@@ -209,7 +212,7 @@ private fun WlanCard(
             )
         }
 
-        if (linkInfo.ssid != null) {
+        if (linkInfo.ssid != null || linkInfo.gatewayIp != null) {
             Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier
@@ -228,7 +231,7 @@ private fun WlanCard(
                         modifier = Modifier.size(18.dp)
                     )
                     Text(
-                        linkInfo.ssid,
+                        linkInfo.ssid ?: "Connected (name hidden — allow Location permission to show it)",
                         modifier = Modifier.padding(start = 8.dp),
                         style = MaterialTheme.typography.bodyMedium
                     )

@@ -25,10 +25,21 @@ val BoatShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp)
 )
 
+// New theme (Figma "New Theme_UI/UX 26 OCT"): dark background, grey cards, green accent.
 private val DarkColorScheme = darkColorScheme(
-    primary = BoatRed80,
-    secondary = BoatOrange80,
-    tertiary = BoatGreen80
+    primary = DashColors.Accent,
+    onPrimary = DashColors.Text,
+    secondary = DashColors.Accent,
+    onSecondary = DashColors.SubCard,
+    tertiary = DashColors.Accent,
+    background = DashColors.Background,
+    onBackground = DashColors.Text,
+    surface = DashColors.Background,
+    onSurface = DashColors.Text,
+    surfaceVariant = DashColors.Card,
+    onSurfaceVariant = DashColors.TextSecondary,
+    outline = DashColors.Grey3F,
+    error = androidx.compose.ui.graphics.Color(0xFFFF6B6B)
 )
 
 private val LightColorScheme = lightColorScheme(
@@ -39,7 +50,8 @@ private val LightColorScheme = lightColorScheme(
 
 @Composable
 fun DashcamCompanionTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
+    // The new design is dark-only, so the dark scheme is always used.
+    darkTheme: Boolean = true,
     // boAt's red brand palette should stay consistent regardless of the phone's
     // wallpaper-derived Material You colors, so dynamic color defaults off here.
     dynamicColor: Boolean = false,

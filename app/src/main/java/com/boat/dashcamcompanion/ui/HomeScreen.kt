@@ -23,6 +23,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +35,13 @@ import androidx.compose.ui.unit.dp
 /** Landing screen: mirrors the reference app's "May I help you~" home tab with its
  *  standalone red pill "Add Dash Cam" CTA and a Device / Profile bottom bar. */
 @Composable
-fun HomeScreen(onAddDashCam: () -> Unit) {
+fun HomeScreen(
+    onAddDashCam: () -> Unit,
+    onTestVideo: (() -> Unit)? = null,
+    onPotholes: (() -> Unit)? = null,
+    onMap: (() -> Unit)? = null,
+    onPotholeSafety: (() -> Unit)? = null
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -87,6 +94,23 @@ fun HomeScreen(onAddDashCam: () -> Unit) {
                     style = MaterialTheme.typography.titleMedium
                 )
             }
+
+            if (onPotholes != null) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onPotholes) { Text("Potholes found (reports)") }
+            }
+            if (onMap != null) {
+                TextButton(onClick = onMap) { Text("Pothole map") }
+            }
+            if (onPotholeSafety != null) {
+                TextButton(onClick = onPotholeSafety) { Text("Pothole safety settings") }
+            }
+            // Developer bench test: run pothole detection on a video file, no dashcam needed.
+            if (onTestVideo != null) {
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onTestVideo) { Text("Test pothole detection with a video file") }
+            }
+
 
             Spacer(Modifier.weight(2f))
         }

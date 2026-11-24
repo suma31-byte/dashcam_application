@@ -1,0 +1,7 @@
+Third-party components
+
+1) Parts of the frame capture, frame quality check, multi-frame confirmation and
+   de-duplication logic are adapted from pothole-reporter by Gaurav Sen
+   (https://github.com/coding-parrot/pothole-reporter), MIT License, Copyright (c) 2026 Gaurav Sen.
+
+2) Map data (c) OpenStreetMap contributors, ODbL. Map view: osmdroid (Apache License 2.0).

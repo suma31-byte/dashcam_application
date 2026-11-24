@@ -10,22 +10,38 @@ object SdpParser {
     data class SdpInfo(
         val aggregateControl: String?,
         val trackControl: String?,
-        val spropParameterSets: String?
+        val spropParameterSets: String?,
+        /** RTP payload type announced for the video track, e.g. 97 in "m=video 0 RTP/AVP 97". */
+        val videoPayloadType: Int? = null
     )
 
     fun parseSdp(body: String): SdpInfo {
         var aggregateControl: String? = null
         var trackControl: String? = null
         var sprop: String? = null
+        var videoPayloadType: Int? = null
         var inVideoBlock = false
+        var seenMedia = false
         for (rawLine in body.lines()) {
             val line = rawLine.trim()
             when {
-                line.startsWith("m=video") -> inVideoBlock = true
-                line.startsWith("m=") -> inVideoBlock = false
+                line.startsWith("m=video") -> {
+                    inVideoBlock = true
+                    seenMedia = true
+                    // "m=video <port> RTP/AVP <payload types...>": the first listed type is the stream.
+                    videoPayloadType = line.split(' ').filter { it.isNotEmpty() }.getOrNull(3)?.toIntOrNull()
+                }
+                line.startsWith("m=") -> { inVideoBlock = false; seenMedia = true }
                 line.startsWith("a=control:") -> {
                     val value = line.substringAfter("a=control:")
-                    if (inVideoBlock) trackControl = value else aggregateControl = value
+                    if (inVideoBlock) {
+                        trackControl = value
+                    } else if (!seenMedia) {
+                        // Only a control line before the first "m=" is the whole-session one;
+                        // inside an audio block it belongs to the audio track and must not
+                        // overwrite it (the F1 Pro lists audio first).
+                        aggregateControl = value
+                    }
                 }
                 inVideoBlock && line.startsWith("a=fmtp:") -> {
                     val params = line.substringAfter(' ')
@@ -38,7 +54,7 @@ object SdpParser {
                 }
             }
         }
-        return SdpInfo(aggregateControl, trackControl, sprop)
+        return SdpInfo(aggregateControl, trackControl, sprop, videoPayloadType)
     }
 
     /**

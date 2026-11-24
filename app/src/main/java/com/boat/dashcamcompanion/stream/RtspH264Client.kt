@@ -29,8 +29,19 @@ import java.net.URI
 class RtspH264Client(private val onStatus: (String) -> Unit) {
 
     @Volatile private var running = false
+    @Volatile private var firstFrameLogged = false
+
+    /** Receives every complete video frame (Annex-B bytes) with its RTP timestamp, on the network thread. */
+    @Volatile var accessUnitListener: ((ByteArray, Long) -> Unit)? = null
+
+    /**
+     * Receives the stream's SPS/PPS (Annex-B bytes) from the SDP once per session, before the
+     * first frame. A second decoder (e.g. [AnalysisFrameDecoder] for pothole detection) needs
+     * these to decode the frames from [accessUnitListener].
+     */
+    @Volatile var codecConfigListener: ((ByteArray) -> Unit)? = null
     private var socket: Socket? = null
-    private var codec: MediaCodec? = null
+    @Volatile private var codec: MediaCodec? = null
     private var thread: Thread? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -67,6 +78,22 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
                 running = false
             }
         }.also { it.name = "RtspH264Client"; it.start() }
+    }
+
+    /**
+     * Moves the live video to another Surface without restarting the stream - e.g. to an
+     * off-screen sink when the screen turns off, and back to the view when it returns, so
+     * the stream (and detection) keep running in the background.
+     */
+    fun setOutputSurface(surface: Surface): Boolean {
+        val c = codec ?: return false
+        return try {
+            c.setOutputSurface(surface)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "setOutputSurface not supported by this decoder: ${e.message}")
+            false
+        }
     }
 
     fun stop() {
@@ -148,8 +175,10 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
         postStatus("Streaming")
 
         val paramSets = sprop.split(",").mapNotNull {
-            try { Base64.decode(it, Base64.DEFAULT) } catch (e: Exception) { null }
+            try { H264Utils.stripStartCode(Base64.decode(it, Base64.DEFAULT)) } catch (e: Exception) { null }
         }
+        firstFrameLogged = false
+        Log.i(TAG, "SDP: aggregate=$aggregateUrl track=$trackUrl session=$session paramSetSizes=${paramSets.map { it.size }}")
         val mediaCodec = MediaCodec.createDecoderByType("video/avc")
         val format = MediaFormat.createVideoFormat("video/avc", 1280, 720)
         // Request the decoder's low-latency path: on Android 11+ (API 30) with a
@@ -170,6 +199,10 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
         // and that whole frame silently vanished — a stutter with no visible error.
         // Sizing this generously up front avoids ever hitting that path.
         format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 512 * 1024)
+        // The real picture size comes from the stream's own SPS (the F1 Pro sends 960x544, not
+        // 1280x720). Declaring a generous maximum lets the decoder switch to it on its own.
+        format.setInteger(MediaFormat.KEY_MAX_WIDTH, 1920)
+        format.setInteger(MediaFormat.KEY_MAX_HEIGHT, 1088)
         mediaCodec.configure(format, surface, null, 0)
         mediaCodec.setCallback(object : MediaCodec.Callback() {
             override fun onInputBufferAvailable(codec: MediaCodec, index: Int) {
@@ -178,6 +211,10 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
             }
 
             override fun onOutputBufferAvailable(codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                if (!firstFrameLogged) {
+                    firstFrameLogged = true
+                    Log.i(TAG, "first decoded frame (size=${info.size} flags=${info.flags})")
+                }
                 // Render at the scheduled time (derived from the camera's own RTP
                 // clock below), not "immediately" — immediate rendering is what threw
                 // away all timing information and let network jitter reach the screen
@@ -188,13 +225,17 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
             }
 
             override fun onError(codec: MediaCodec, e: MediaCodec.CodecException) {
-                Log.w(TAG, "MediaCodec error", e)
+                Log.w(TAG, "MediaCodec error: ${e.diagnosticInfo}", e)
             }
 
-            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {}
+            override fun onOutputFormatChanged(codec: MediaCodec, format: MediaFormat) {
+                Log.i(TAG, "decoder output format: $format")
+            }
         })
         mediaCodec.start()
         codec = mediaCodec
+
+        if (paramSets.isNotEmpty()) codecConfigListener?.invoke(buildAnnexB(paramSets))
 
         if (paramSets.isNotEmpty()) {
             // Config-only NALs carry no picture, so their timestamp doesn't matter —
@@ -202,10 +243,27 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
             feedAccessUnit(mediaCodec, AccessUnit(buildAnnexB(paramSets), 0L))
         }
 
-        readInterleavedRtpLoop(input, mediaCodec)
+        readInterleavedRtpLoop(input, mediaCodec, sdp.videoPayloadType) {
+            // RTSP keep-alive: tells the server the session is still in use. Without it, servers
+            // that enforce the session timeout (e.g. MediaMTX for PC bench tests, 60 s) drop us.
+            try { sendRequest(output, "GET_PARAMETER", aggregateUrl, ++cseq, mapOf("Session" to session)) }
+            catch (e: Exception) { Log.w(TAG, "keep-alive failed: ${e.message}") }
+        }
     }
 
-    private fun readInterleavedRtpLoop(input: InputStream, mediaCodec: MediaCodec) {
+    /**
+     * Cameras do not always send video on the interleaved channel they agreed to in SETUP (the
+     * boAt Hive F1 Pro replies "interleaved=0-1" but sends the video on channel 2, next to audio
+     * it was never asked for). Video is therefore recognised by the RTP payload type from the SDP;
+     * only if the SDP gave none do we fall back to channel 0.
+     */
+    private fun readInterleavedRtpLoop(
+        input: InputStream,
+        mediaCodec: MediaCodec,
+        videoPayloadType: Int?,
+        sendKeepAlive: () -> Unit = {}
+    ) {
+        var lastKeepAliveMs = android.os.SystemClock.elapsedRealtime()
         val nalAccumulator = mutableListOf<ByteArray>()
         var fuBuffer: ByteArrayOutputStream? = null
         var fuNalHeader = 0
@@ -216,7 +274,22 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
         val timestampScheduler = RtpTimestampScheduler()
         fun scheduledPtsUs(rawTimestamp: Long): Long = timestampScheduler.scheduledPtsUs(rawTimestamp)
 
+        // Counters for the log, so "connected but black" can be diagnosed from adb logcat.
+        var packetCount = 0
+        var otherChannelPackets = 0
+        var accessUnitCount = 0
+        var lastStatsMs = android.os.SystemClock.elapsedRealtime()
+
         while (running) {
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            if (nowMs - lastKeepAliveMs >= KEEP_ALIVE_MS) {
+                lastKeepAliveMs = nowMs
+                sendKeepAlive() // the reply arrives as text between '$' frames and is skipped below
+            }
+            if (nowMs - lastStatsMs >= 2000) {
+                lastStatsMs = nowMs
+                Log.i(TAG, "rtp: videoPackets=$packetCount otherChannelPackets=$otherChannelPackets accessUnits=$accessUnitCount")
+            }
             val marker = input.read()
             if (marker == -1) break
             if (marker != 0x24) continue // '$' marks an interleaved binary frame
@@ -233,9 +306,16 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
                 if (r == -1) break
                 readCount += r
             }
-            if (readCount < length || channel != 0) continue // channel 0 = RTP, 1 = RTCP
+            if (readCount < length || packet.size < 12) continue
+            val payloadType = packet[1].toInt() and 0x7F
+            val isVideo = if (videoPayloadType != null) payloadType == videoPayloadType else channel == 0
+            if (!isVideo) { // audio, RTCP reports, anything else
+                otherChannelPackets++
+                continue
+            }
+            if (packetCount == 0) Log.i(TAG, "video arrives on interleaved channel $channel, payload type $payloadType")
+            packetCount++
 
-            if (packet.size < 12) continue
             val vpxcc = packet[0].toInt() and 0xFF
             val csrcCount = vpxcc and 0x0F
             val hasExtension = (vpxcc and 0x10) != 0
@@ -296,7 +376,13 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
             }
 
             if (markerBit && nalAccumulator.isNotEmpty()) {
-                feedAccessUnit(mediaCodec, AccessUnit(buildAnnexB(nalAccumulator), scheduledPtsUs(rawTimestamp)))
+                if (accessUnitCount == 0) {
+                    Log.i(TAG, "first access unit NAL types=${nalAccumulator.map { it[0].toInt() and 0x1F }}")
+                }
+                accessUnitCount++
+                val annexB = buildAnnexB(nalAccumulator)
+                accessUnitListener?.invoke(annexB, rawTimestamp)
+                feedAccessUnit(mediaCodec, AccessUnit(annexB, scheduledPtsUs(rawTimestamp)))
                 nalAccumulator.clear()
             }
         }
@@ -397,5 +483,7 @@ class RtspH264Client(private val onStatus: (String) -> Unit) {
 
     companion object {
         private const val TAG = "RtspH264Client"
+        /** RTSP session keep-alive interval; well under the usual 60 s session timeout. */
+        private const val KEEP_ALIVE_MS = 20_000L
     }
 }
